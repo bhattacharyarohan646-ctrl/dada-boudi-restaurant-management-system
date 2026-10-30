@@ -1,0 +1,98 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for role validation
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'admin' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         getUserData().role == 'admin')
+      );
+    }
+
+    function isStaff() {
+      return isAuthenticated() && (
+        isAdmin() ||
+        request.auth.token.role == 'staff' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         getUserData().role == 'staff')
+      );
+    }
+
+    // User profiles collection
+    match /users/{userId} {
+      // User can read and update their own profile (e.g. phone number, name)
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      // Normal users cannot elevate their own role to admin/staff
+      allow update: if isOwner(userId) && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Reservations collection
+    match /reservations/{reservationId} {
+      // Customers can read only their own bookings; Staff and Admins can read all bookings
+      allow read: if isStaff() || (isAuthenticated() && resource.data.customerUid == request.auth.uid);
+
+      // Customers can create bookings for themselves with valid required fields
+      allow create: if isAuthenticated() &&
+        request.resource.data.customerUid == request.auth.uid &&
+        request.resource.data.status in ['confirmed', 'pending'] &&
+        request.resource.data.guests > 0 &&
+        request.resource.data.guests <= 20;
+
+      // Customers can only update their own reservation to 'cancelled'
+      // Staff/Admins can update any status or assigned table
+      allow update: if isStaff() || (
+        isAuthenticated() &&
+        resource.data.customerUid == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+        request.resource.data.status == 'cancelled'
+      );
+
+      // Only Admins can permanently delete reservation records
+      allow delete: if isAdmin();
+    }
+
+    // Tables collection
+    match /tables/{tableId} {
+      // Any authenticated or anonymous user can view table availability layout
+      allow read: if true;
+      // Only Staff and Admins can update table statuses (Occupied, Cleaning, Available, Reserved)
+      allow write: if isStaff();
+    }
+
+    // Customers directory (CRM)
+    match /customers/{customerId} {
+      // Only Staff and Admin can view CRM customer details & visit metrics
+      allow read, write: if isStaff();
+    }
+
+    // Waitlist collection
+    match /waitlist/{entryId} {
+      // Customers can read their own waitlist entry; Staff can view full queue
+      allow read: if isStaff() || (isAuthenticated() && resource.data.customerUid == request.auth.uid);
+      allow create: if isAuthenticated();
+      allow update, delete: if isStaff() || (isAuthenticated() && resource.data.customerUid == request.auth.uid);
+    }
+
+    // Restaurant metadata & settings
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
